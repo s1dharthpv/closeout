@@ -138,3 +138,110 @@ class TestPartialPeriodClosing(IntegrationTestCase):
 		_cols, rows, *_rest = readiness({"company": COMPANY, "fiscal_year": "2026-2027"})
 		check = next(r for r in rows if r["check"].startswith("Earlier fiscal years"))
 		self.assertEqual((check["status"], check["count"]), ("Fail", 1))
+
+
+class TestReportFilters(IntegrationTestCase):
+	"""Cost center, project and finance book filters keep the report balanced.
+
+	Each extra journal entry is tagged on every line, so any filtered view of the ledger balances
+	by itself. All entries fall in FY 2024-25, so they are prior-year profit for FY 2025-26.
+	Base prior-year profit of the demo data (untagged) is 70,000.
+	"""
+
+	BASE = 70000
+
+	def setUp(self):
+		self.cash = "Cash - CDC"
+		self.income = "Interest on Fixed Deposits - CDC"
+		root = frappe.db.get_all(
+			"Cost Center", {"company": COMPANY, "is_group": 1}, pluck="name", order_by="lft", limit=1
+		)[0]
+		self.cc = frappe.get_doc(
+			{
+				"doctype": "Cost Center",
+				"cost_center_name": "Closeout B",
+				"company": COMPANY,
+				"parent_cost_center": root,
+			}
+		).insert()
+		self.project = frappe.get_doc(
+			{"doctype": "Project", "project_name": "Closeout Test Project", "company": COMPANY}
+		).insert()
+		self.book = frappe.get_doc({"doctype": "Finance Book", "finance_book_name": "Closeout FB"}).insert()
+		self.entries = []
+		self._post(40000, cost_center=self.cc.name)
+		self._post(20000, project=self.project.name)
+		self._post(10000, finance_book=self.book.name)
+		self.addCleanup(self._cleanup)
+
+	def _post(self, amount, cost_center=None, project=None, finance_book=None):
+		extra = {}
+		if cost_center:
+			extra["cost_center"] = cost_center
+		if project:
+			extra["project"] = project
+		je = frappe.get_doc(
+			{
+				"doctype": "Journal Entry",
+				"company": COMPANY,
+				"posting_date": "2024-12-01",
+				"finance_book": finance_book,
+				"accounts": [
+					{"account": self.cash, "debit_in_account_currency": amount, **extra},
+					{"account": self.income, "credit_in_account_currency": amount, **extra},
+				],
+			}
+		).insert()
+		je.submit()
+		self.entries.append(je.name)
+
+	def _cleanup(self):
+		for name in self.entries:
+			je = frappe.get_doc("Journal Entry", name)
+			if je.docstatus == 1:
+				je.cancel()
+			frappe.delete_doc("Journal Entry", name, force=True)
+		frappe.delete_doc("Finance Book", self.book.name, force=True)
+		frappe.delete_doc("Project", self.project.name, force=True)
+		frappe.delete_doc("Cost Center", self.cc.name, force=True)
+
+	def _run(self, **filters):
+		base = {"company": COMPANY, "fiscal_year": "2025-2026"}
+		_cols, data, _msg = trial_balance({**base, **filters})
+		virtual = next((d for d in data if d.get("account") == "Unclosed prior-year P&L (virtual)"), None)
+		return virtual, _total(data)
+
+	def _assert_balanced(self, total):
+		self.assertEqual(total["opening_debit"], total["opening_credit"])
+		self.assertEqual(total["closing_debit"], total["closing_credit"])
+
+	def test_cost_center_filter(self):
+		virtual, total = self._run(cost_center=self.cc.name)
+		self.assertEqual(virtual["opening_credit"], 40000)
+		self._assert_balanced(total)
+
+	def test_project_filter(self):
+		virtual, total = self._run(project=[self.project.name])
+		self.assertEqual(virtual["opening_credit"], 20000)
+		self._assert_balanced(total)
+
+	def test_finance_book_filter(self):
+		# entries of the chosen book are added to the entries that have no book
+		virtual, total = self._run(finance_book=self.book.name)
+		self.assertEqual(virtual["opening_credit"], self.BASE + 40000 + 20000 + 10000)
+		self._assert_balanced(total)
+
+	def test_no_filter_when_a_finance_book_exists(self):
+		# core leaves out entries of any book that is not selected, so the virtual row must too
+		virtual, total = self._run()
+		self.assertEqual(virtual["opening_credit"], self.BASE + 40000 + 20000)
+		self._assert_balanced(total)
+
+	def test_default_finance_book_entries_are_included(self):
+		previous = frappe.db.get_value("Company", COMPANY, "default_finance_book")
+		frappe.db.set_value("Company", COMPANY, "default_finance_book", self.book.name)
+		self.addCleanup(frappe.db.set_value, "Company", COMPANY, "default_finance_book", previous)
+		frappe.clear_cache()
+		virtual, total = self._run(include_default_book_entries=1)
+		self.assertEqual(virtual["opening_credit"], self.BASE + 40000 + 20000 + 10000)
+		self._assert_balanced(total)

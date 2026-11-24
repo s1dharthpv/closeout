@@ -49,7 +49,7 @@ bench --site your-site install-app closeout
 ## Limitations
 
 - The virtual row is in the company currency. Presentation currency is not applied to it.
-- The cost center, project and finance book filters are applied to the virtual row, but they have had little testing. Check the result against the General Ledger before relying on it.
+- The cost center, project and finance book filters are applied to the virtual row and covered by tests on a small demo company. Accounting dimensions other than cost center and project are not applied to it yet, so the report can be out of balance when one of those is used. Check the result against the General Ledger before relying on it.
 - Reports do not apply per-user company permissions. Control access with roles.
 - The checklist does not yet cover stock value against the ledger, exchange rate revaluation or accounting dimension gaps.
 - Tested on a small demo company. Try it on a copy of your data first.

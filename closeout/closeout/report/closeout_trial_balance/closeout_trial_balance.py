@@ -4,7 +4,7 @@ from erpnext.accounts.report.financial_statements import get_cost_centers_with_c
 from erpnext.accounts.report.trial_balance.trial_balance import execute as core_execute
 from frappe import _
 from frappe.query_builder.functions import Sum
-from frappe.utils import flt, getdate
+from frappe.utils import cstr, flt, getdate
 
 VIRTUAL_ROW = "Unclosed prior-year P&L (virtual)"
 
@@ -80,7 +80,13 @@ def get_unclosed_pl_before(filters):
 	if filters.get("cost_center"):
 		query = query.where(gle.cost_center.isin(get_cost_centers_with_children(filters.cost_center)))
 	if filters.get("project"):
-		query = query.where(gle.project.isin(filters.project))
-	if filters.get("finance_book"):
-		query = query.where(gle.finance_book.isin([filters.finance_book, ""]) | gle.finance_book.isnull())
+		projects = filters.project if isinstance(filters.project, list) else [filters.project]
+		query = query.where(gle.project.isin(projects))
+	# Same rule as core: once any Finance Book exists, entries of a book that is not selected
+	# are left out, even when no book is chosen.
+	if frappe.db.count("Finance Book"):
+		books = [cstr(filters.get("finance_book")), ""]
+		if filters.get("include_default_book_entries"):
+			books.append(cstr(frappe.get_cached_value("Company", filters.company, "default_finance_book")))
+		query = query.where(gle.finance_book.isin(books) | gle.finance_book.isnull())
 	return query.run()[0][0] or 0
