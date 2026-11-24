@@ -1,7 +1,9 @@
 import frappe
+from erpnext import is_perpetual_inventory_enabled
+from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import apply_unscoped_filters
 from frappe import _
-from frappe.query_builder.functions import Count, Sum
-from frappe.utils import flt, getdate
+from frappe.query_builder.functions import Count, Max, Sum
+from frappe.utils import flt, formatdate, getdate
 
 DRAFT_DOCTYPES = (
 	("Sales Invoice", "posting_date"),
@@ -32,6 +34,8 @@ def execute(filters=None):
 	rows.append(check_unreconciled_bank(filters.company, start, end))
 	rows.append(check_unallocated_payments(filters.company, start, end))
 	rows.append(check_unclosed_prior_years(filters.company, start))
+	rows.append(check_stock_closing_entry(filters.company, end))
+	rows.extend(check_background_jobs(filters.company, end))
 	currency = frappe.get_cached_value("Company", filters.company, "default_currency")
 	rows = [r for r in rows if r]
 	for r in rows:
@@ -175,3 +179,121 @@ def check_unclosed_prior_years(company, start):
 		count=len(unclosed),
 		hint=_("No voucher for: {0}.").format(", ".join(sorted(unclosed))),
 	)
+
+
+def check_stock_closing_entry(company, end):
+	"""Mirrors what Period Closing Voucher demands at submit, but shown up front and in one place.
+
+	Core only asks for a company-wide, completed and fresh Stock Closing Entry when the company
+	uses perpetual inventory and has stock ledger entries up to the period end.
+	"""
+	label = _("Stock Closing Entry is completed and up to date")
+	if not frappe.db.exists("DocType", "Stock Closing Entry"):
+		return None
+	if not is_perpetual_inventory_enabled(company) or not frappe.db.exists(
+		"Stock Ledger Entry", {"company": company, "is_cancelled": 0, "posting_date": ("<=", end)}
+	):
+		return None
+
+	failed = frappe.db.count("Stock Closing Entry", {"company": company, "status": "Failed", "docstatus": 1})
+	entry = frappe.db.get_value(
+		"Stock Closing Entry",
+		apply_unscoped_filters({"company": company, "to_date": end, "docstatus": 1}),
+		["name", "status", "modified"],
+		as_dict=True,
+	)
+	if not entry:
+		return _row(
+			label,
+			False,
+			count=1,
+			hint=_("Create a company-wide Stock Closing Entry with To Date {0}.").format(formatdate(end)),
+		)
+	if entry.status != "Completed":
+		return _row(
+			label,
+			False,
+			count=1,
+			hint=_("{0} is {1}. Wait for it, or fix it if it failed.").format(entry.name, entry.status),
+		)
+
+	sle = frappe.qb.DocType("Stock Ledger Entry")
+	last_change = (
+		frappe.qb.from_(sle)
+		.select(Max(sle.modified))
+		.where((sle.company == company) & (sle.posting_date <= end))
+	).run()[0][0]
+	if last_change and last_change > entry.modified:
+		return _row(
+			label,
+			False,
+			count=1,
+			hint=_("Stock moved after {0} was made. Regenerate it.").format(entry.name),
+		)
+	if failed:
+		return _row(
+			label,
+			False,
+			count=failed,
+			hint=_(
+				"{0} earlier Stock Closing Entries failed. Cancel them so they are not used as an opening balance."
+			).format(failed),
+		)
+	return _row(label, True)
+
+
+def check_background_jobs(company, end):
+	"""Reposting and closing run in the background on v16. Anything not finished can change the numbers."""
+	unfinished = (
+		(
+			_("No pending or failed Repost Item Valuation"),
+			"Repost Item Valuation",
+			{
+				"company": company,
+				"docstatus": 1,
+				"status": ("in", ["Queued", "In Progress", "Failed"]),
+				"posting_date": ("<=", end),
+			},
+			_("Let these finish, or open the failed ones and retry."),
+		),
+		(
+			_("No pending or failed Repost Accounting Ledger"),
+			"Repost Accounting Ledger",
+			{
+				"company": company,
+				"docstatus": 1,
+				"status": ("in", ["Queued", "In Progress", "Partially Reposted", "Failed"]),
+			},
+			_("Let these finish, or open the failed ones and retry."),
+		),
+	)
+	out = []
+	for label, doctype, filters, hint in unfinished:
+		if not frappe.db.exists("DocType", doctype):
+			continue
+		count = frappe.db.count(doctype, filters)
+		out.append(_row(label, count == 0, count=count, hint=hint))
+
+	if frappe.db.exists("DocType", "Process Period Closing Voucher"):
+		ppcv = frappe.qb.DocType("Process Period Closing Voucher")
+		pcv = frappe.qb.DocType("Period Closing Voucher")
+		count = (
+			frappe.qb.from_(ppcv)
+			.join(pcv)
+			.on(ppcv.parent_pcv == pcv.name)
+			.select(Count(ppcv.name))
+			.where(
+				(pcv.company == company)
+				& (ppcv.docstatus == 1)
+				& (ppcv.status.isin(["Queued", "Running", "Paused"]))
+			)
+		).run()[0][0]
+		out.append(
+			_row(
+				_("No Period Closing Voucher still processing"),
+				not count,
+				count=int(count or 0),
+				hint=_("A voucher is still posting in the background. Wait before reading the books."),
+			)
+		)
+	return out

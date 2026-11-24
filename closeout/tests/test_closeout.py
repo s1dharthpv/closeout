@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
@@ -245,3 +247,113 @@ class TestReportFilters(IntegrationTestCase):
 		virtual, total = self._run(include_default_book_entries=1)
 		self.assertEqual(virtual["opening_credit"], self.BASE + 40000 + 20000 + 10000)
 		self._assert_balanced(total)
+
+
+class TestBackgroundAndStockChecks(IntegrationTestCase):
+	"""The v16 checks: background jobs and the Stock Closing Entry.
+
+	Documents are written straight to the table, so no background job or posting is triggered.
+	"""
+
+	END = "2027-03-31"
+
+	def _insert(self, doctype, **values):
+		doc = frappe.new_doc(doctype)
+		doc.update({"company": COMPANY, "docstatus": 1, **values})
+		doc.name = frappe.generate_hash(length=12)
+		doc.flags.name_set = True
+		doc.db_insert()
+		self.addCleanup(frappe.db.delete, doctype, {"name": doc.name})
+		return doc
+
+	def _rows(self):
+		_cols, rows, *_rest = readiness({"company": COMPANY, "fiscal_year": "2026-2027"})
+		return {r["check"]: r for r in rows}
+
+	def test_clean_site_passes_background_checks(self):
+		rows = self._rows()
+		for label in (
+			"No pending or failed Repost Item Valuation",
+			"No pending or failed Repost Accounting Ledger",
+			"No Period Closing Voucher still processing",
+		):
+			self.assertEqual((rows[label]["status"], rows[label]["count"]), ("Pass", 0), label)
+
+	def test_failed_repost_item_valuation_is_flagged(self):
+		self._insert("Repost Item Valuation", status="Failed", posting_date="2026-06-01")
+		row = self._rows()["No pending or failed Repost Item Valuation"]
+		self.assertEqual((row["status"], row["count"]), ("Fail", 1))
+
+	def test_repost_after_year_end_is_ignored(self):
+		self._insert("Repost Item Valuation", status="Queued", posting_date="2027-06-01")
+		row = self._rows()["No pending or failed Repost Item Valuation"]
+		self.assertEqual(row["status"], "Pass")
+
+	def test_pending_repost_accounting_ledger_is_flagged(self):
+		self._insert("Repost Accounting Ledger", status="Queued")
+		row = self._rows()["No pending or failed Repost Accounting Ledger"]
+		self.assertEqual((row["status"], row["count"]), ("Fail", 1))
+
+	def test_stock_closing_check_is_skipped_without_perpetual_inventory(self):
+		self.assertNotIn("Stock Closing Entry is completed and up to date", self._rows())
+
+	def _with_stock(self):
+		"""Pretend the company uses perpetual inventory and has stock ledger entries."""
+		real_exists = frappe.db.exists
+
+		def exists(doctype, *args, **kwargs):
+			if doctype == "Stock Ledger Entry":
+				return True
+			return real_exists(doctype, *args, **kwargs)
+
+		for target, replacement in (
+			(
+				"closeout.closeout.report.close_readiness.close_readiness.is_perpetual_inventory_enabled",
+				lambda company: True,
+			),
+			("frappe.db.exists", exists),
+		):
+			patcher = patch(target, replacement)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+	def test_missing_stock_closing_entry_fails(self):
+		self._with_stock()
+		row = self._rows()["Stock Closing Entry is completed and up to date"]
+		self.assertEqual(row["status"], "Fail")
+		self.assertIn("To Date", row["hint"])
+
+	def test_unfinished_stock_closing_entry_fails(self):
+		self._with_stock()
+		self._insert("Stock Closing Entry", status="In Progress", to_date=self.END, from_date="2026-04-01")
+		row = self._rows()["Stock Closing Entry is completed and up to date"]
+		self.assertEqual(row["status"], "Fail")
+		self.assertIn("In Progress", row["hint"])
+
+	def test_completed_stock_closing_entry_passes(self):
+		self._with_stock()
+		self._insert("Stock Closing Entry", status="Completed", to_date=self.END, from_date="2026-04-01")
+		row = self._rows()["Stock Closing Entry is completed and up to date"]
+		self.assertEqual(row["status"], "Pass")
+
+	def test_stale_stock_closing_entry_fails(self):
+		self._with_stock()
+		self._insert(
+			"Stock Closing Entry",
+			status="Completed",
+			to_date=self.END,
+			from_date="2026-04-01",
+			modified="2020-01-01 00:00:00",
+		)
+		self._insert("Stock Ledger Entry", posting_date="2026-06-01", is_cancelled=0)
+		row = self._rows()["Stock Closing Entry is completed and up to date"]
+		self.assertEqual(row["status"], "Fail")
+		self.assertIn("Regenerate", row["hint"])
+
+	def test_earlier_failed_stock_closing_entry_fails(self):
+		self._with_stock()
+		self._insert("Stock Closing Entry", status="Completed", to_date=self.END, from_date="2026-04-01")
+		self._insert("Stock Closing Entry", status="Failed", to_date="2026-03-31", from_date="2025-04-01")
+		row = self._rows()["Stock Closing Entry is completed and up to date"]
+		self.assertEqual((row["status"], row["count"]), ("Fail", 1))
+		self.assertIn("failed", row["hint"])
