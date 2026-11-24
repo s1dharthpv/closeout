@@ -32,7 +32,10 @@ def execute(filters=None):
 	rows.append(check_unreconciled_bank(filters.company, start, end))
 	rows.append(check_unallocated_payments(filters.company, start, end))
 	rows.append(check_unclosed_prior_years(filters.company, start))
+	currency = frappe.get_cached_value("Company", filters.company, "default_currency")
 	rows = [r for r in rows if r]
+	for r in rows:
+		r["currency"] = currency
 
 	failed = sum(1 for r in rows if r["status"] == "Fail")
 	summary = [
@@ -49,23 +52,28 @@ def execute(filters=None):
 
 def get_columns():
 	return [
-		{"fieldname": "check", "label": _("Check"), "fieldtype": "Data", "width": 320},
-		{"fieldname": "status", "label": _("Status"), "fieldtype": "Data", "width": 90},
-		{"fieldname": "count", "label": _("Count"), "fieldtype": "Int", "width": 90},
-		{"fieldname": "amount", "label": _("Amount"), "fieldtype": "Float", "width": 130},
-		{"fieldname": "hint", "label": _("What to do"), "fieldtype": "Data", "width": 420},
-		{"fieldname": "doctype", "label": _("Open list of"), "fieldtype": "Data", "width": 140, "hidden": 1},
+		{"fieldname": "check", "label": _("Check"), "fieldtype": "Data", "width": 400, "align": "left"},
+		{"fieldname": "status", "label": _("Status"), "fieldtype": "Data", "width": 90, "align": "left"},
+		{"fieldname": "count", "label": _("Count"), "fieldtype": "Int", "width": 80},
+		{
+			"fieldname": "amount",
+			"label": _("Amount"),
+			"fieldtype": "Currency",
+			"options": "currency",
+			"width": 130,
+		},
+		{"fieldname": "hint", "label": _("What to do"), "fieldtype": "Data", "width": 640, "align": "left"},
 	]
 
 
-def _row(check, ok, count=0, amount=0.0, hint="", doctype=None):
+def _row(check, ok, count=0, amount=0.0, hint="", currency=None):
 	return {
 		"check": check,
 		"status": "Pass" if ok else "Fail",
 		"count": count,
 		"amount": flt(amount),
 		"hint": "" if ok else hint,
-		"doctype": doctype,
+		"currency": currency,
 	}
 
 
@@ -101,7 +109,6 @@ def check_drafts(company, start, end):
 				count == 0,
 				count=count,
 				hint=_("Submit or delete these drafts before closing."),
-				doctype=doctype,
 			)
 		)
 	return out
@@ -124,7 +131,6 @@ def check_unreconciled_bank(company, start, end):
 		count == 0,
 		count=count,
 		hint=_("Reconcile these in the Bank Reconciliation Tool."),
-		doctype="Bank Transaction",
 	)
 
 
@@ -147,7 +153,6 @@ def check_unallocated_payments(company, start, end):
 		count=count,
 		amount=amount,
 		hint=_("Allocate these payments to invoices, or confirm they are real advances."),
-		doctype="Payment Entry",
 	)
 
 
@@ -168,7 +173,5 @@ def check_unclosed_prior_years(company, start):
 		_("Earlier fiscal years have a Period Closing Voucher"),
 		not unclosed,
 		count=len(unclosed),
-		hint=_("No voucher for: {0}. Closeout Trial Balance shows their profit as a virtual row.").format(
-			", ".join(sorted(unclosed))
-		),
+		hint=_("No voucher for: {0}. See Closeout Trial Balance.").format(", ".join(sorted(unclosed))),
 	)
