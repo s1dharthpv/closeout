@@ -4,6 +4,8 @@ Year-end close helper for ERPNext on Frappe v16.
 
 Closeout adds two reports that help when books are closed without a Period Closing Voucher every year. It reads your ledger and posts nothing.
 
+![Closeout demo: the standard Trial Balance does not balance, Closeout adds one virtual row so it does, and Close Readiness flags what is left to fix](docs/closeout-demo.gif)
+
 ## The problem
 
 ERPNext's Trial Balance starts Income and Expense accounts afresh each fiscal year. It assumes the previous year's profit was already moved to equity by a Period Closing Voucher. If you never posted that voucher, the opening balance does not balance: Opening Debit and Opening Credit differ by the accumulated profit of the earlier years.
