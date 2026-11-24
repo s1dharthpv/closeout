@@ -52,7 +52,7 @@ def execute(filters=None):
 
 def get_columns():
 	return [
-		{"fieldname": "check", "label": _("Check"), "fieldtype": "Data", "width": 400, "align": "left"},
+		{"fieldname": "check", "label": _("Check"), "fieldtype": "Data", "width": 350, "align": "left"},
 		{"fieldname": "status", "label": _("Status"), "fieldtype": "Data", "width": 90, "align": "left"},
 		{"fieldname": "count", "label": _("Count"), "fieldtype": "Int", "width": 80},
 		{
@@ -62,7 +62,7 @@ def get_columns():
 			"options": "currency",
 			"width": 130,
 		},
-		{"fieldname": "hint", "label": _("What to do"), "fieldtype": "Data", "width": 640, "align": "left"},
+		{"fieldname": "hint", "label": _("What to do"), "fieldtype": "Data", "width": 470, "align": "left"},
 	]
 
 
@@ -173,5 +173,5 @@ def check_unclosed_prior_years(company, start):
 		_("Earlier fiscal years have a Period Closing Voucher"),
 		not unclosed,
 		count=len(unclosed),
-		hint=_("No voucher for: {0}. See Closeout Trial Balance.").format(", ".join(sorted(unclosed))),
+		hint=_("No voucher for: {0}.").format(", ".join(sorted(unclosed))),
 	)

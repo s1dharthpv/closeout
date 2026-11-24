@@ -51,6 +51,18 @@ frappe.query_reports["Closeout Trial Balance"] = {
 		},
 		{ fieldname: "show_zero_values", label: __("Show zero values"), fieldtype: "Check" },
 		{
+			fieldname: "show_net_values",
+			label: __("Show net values in opening and closing columns"),
+			fieldtype: "Check",
+			default: 1,
+		},
+		{
+			fieldname: "show_group_accounts",
+			label: __("Show Group Accounts"),
+			fieldtype: "Check",
+			default: 1,
+		},
+		{
 			fieldname: "show_unclosed_fy_pl_balances",
 			label: __("Show unclosed fiscal year's P&L balances"),
 			fieldtype: "Check",

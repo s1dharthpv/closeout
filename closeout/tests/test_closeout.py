@@ -21,6 +21,13 @@ class TestCloseout(IntegrationTestCase):
 			self.assertEqual(total["opening_debit"], total["opening_credit"], fy)
 			self.assertEqual(total["closing_debit"], total["closing_credit"], fy)
 
+	def test_balances_with_net_values(self):
+		for fy in ("2025-2026", "2026-2027"):
+			_cols, data, _msg = trial_balance({"company": COMPANY, "fiscal_year": fy, "show_net_values": 1})
+			total = _total(data)
+			self.assertEqual(total["opening_debit"], total["opening_credit"], fy)
+			self.assertEqual(total["closing_debit"], total["closing_credit"], fy)
+
 	def test_virtual_row_amount(self):
 		# FY24-25 profit 70,000 + FY25-26 profit 30,000 sit before FY26-27
 		_cols, data, _msg = trial_balance({"company": COMPANY, "fiscal_year": "2026-2027"})
