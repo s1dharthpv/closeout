@@ -357,3 +357,178 @@ class TestBackgroundAndStockChecks(IntegrationTestCase):
 		row = self._rows()["Stock Closing Entry is completed and up to date"]
 		self.assertEqual((row["status"], row["count"]), ("Fail", 1))
 		self.assertIn("failed", row["hint"])
+
+
+PATCH_BALANCES = (
+	"closeout.closeout.report.close_readiness.close_readiness.ExchangeRateRevaluation"
+	".get_account_balance_from_gle"
+)
+
+
+class TestDepreciationAndRevaluationChecks(IntegrationTestCase):
+	"""Unposted depreciation and exchange rate revaluation checks.
+
+	Rows are written straight to the tables so no posting happens. Revaluation balances are mocked,
+	so these test Closeout's comparison, not core's ledger query.
+	"""
+
+	DEPRECIATION = "Depreciation due by year end is booked"
+	REVALUED = "Foreign currency balances revalued at year end rates"
+	RATE_PRESENT = "Exchange rate available for every foreign currency at year end"
+	NO_DRAFT = "No Exchange Rate Revaluation left in Draft"
+
+	def _insert(self, doctype, **values):
+		doc = frappe.new_doc(doctype)
+		doc.update(values)
+		doc.name = values.get("name") or frappe.generate_hash(length=12)
+		doc.flags.name_set = True
+		doc.db_insert()
+		self.addCleanup(frappe.db.delete, doctype, {"name": doc.name})
+		return doc
+
+	def _rows(self):
+		_cols, rows, *_rest = readiness({"company": COMPANY, "fiscal_year": "2026-2027"})
+		return {r["check"]: r for r in rows}
+
+	def _asset(self, status="Submitted", calculate_depreciation=1):
+		return self._insert(
+			"Asset",
+			company=COMPANY,
+			docstatus=1,
+			status=status,
+			calculate_depreciation=calculate_depreciation,
+		)
+
+	def _schedule(self, asset, rows):
+		ads = self._insert(
+			"Asset Depreciation Schedule", asset=asset.name, company=COMPANY, docstatus=1, status="Active"
+		)
+		for idx, (schedule_date, amount, journal_entry) in enumerate(rows, start=1):
+			child = frappe.new_doc("Depreciation Schedule")
+			child.update(
+				{
+					"parent": ads.name,
+					"parenttype": "Asset Depreciation Schedule",
+					"parentfield": "depreciation_schedule",
+					"idx": idx,
+					"schedule_date": schedule_date,
+					"depreciation_amount": amount,
+					"journal_entry": journal_entry,
+				}
+			)
+			child.name = frappe.generate_hash(length=12)
+			child.flags.name_set = True
+			child.db_insert()
+			self.addCleanup(frappe.db.delete, "Depreciation Schedule", {"name": child.name})
+
+	def test_no_depreciating_asset_skips_the_check(self):
+		self.assertNotIn(self.DEPRECIATION, self._rows())
+
+	def test_unposted_depreciation_is_flagged(self):
+		self._schedule(self._asset(), [("2026-09-30", 100, None), ("2027-03-31", 50, None)])
+		row = self._rows()[self.DEPRECIATION]
+		self.assertEqual((row["status"], row["count"], row["amount"]), ("Fail", 2, 150))
+
+	def test_posted_depreciation_passes(self):
+		self._schedule(self._asset(), [("2026-09-30", 100, "ACC-JV-0001")])
+		self.assertEqual(self._rows()[self.DEPRECIATION]["status"], "Pass")
+
+	def test_depreciation_after_year_end_is_ignored(self):
+		self._schedule(self._asset(), [("2027-04-30", 100, None)])
+		self.assertEqual(self._rows()[self.DEPRECIATION]["status"], "Pass")
+
+	def test_scrapped_asset_is_ignored(self):
+		self._schedule(self._asset(), [("2026-09-30", 1, "ACC-JV-0001")])
+		self._schedule(self._asset(status="Scrapped"), [("2026-09-30", 100, None)])
+		self.assertEqual(self._rows()[self.DEPRECIATION]["status"], "Pass")
+
+	def test_hint_says_when_automatic_booking_is_off(self):
+		self._schedule(self._asset(), [("2026-09-30", 100, None)])
+		current = frappe.db.get_single_value(
+			"Accounts Settings", "book_asset_depreciation_entry_automatically"
+		)
+		self.addCleanup(
+			frappe.db.set_single_value,
+			"Accounts Settings",
+			"book_asset_depreciation_entry_automatically",
+			current,
+		)
+		frappe.db.set_single_value("Accounts Settings", "book_asset_depreciation_entry_automatically", 0)
+		self.assertIn("Automatic booking is off", self._rows()[self.DEPRECIATION]["hint"])
+
+	def _foreign(self):
+		base = frappe.get_cached_value("Company", COMPANY, "default_currency")
+		return base, ("EUR" if base != "EUR" else "GBP")
+
+	def _balance(self, currency, in_account, in_base):
+		return frappe._dict(
+			zero_balance=0,
+			account_currency=currency,
+			balance_in_account_currency=in_account,
+			balance=in_base,
+		)
+
+	def _rate(self, foreign, base, rate, date="2027-03-30"):
+		self._insert(
+			"Currency Exchange",
+			from_currency=foreign,
+			to_currency=base,
+			exchange_rate=rate,
+			date=date,
+		)
+
+	def test_balance_at_an_old_rate_is_flagged(self):
+		base, foreign = self._foreign()
+		self._rate(foreign, base, 90)
+		with patch(PATCH_BALANCES, return_value=[self._balance(foreign, 100, 8000)]):
+			row = self._rows()[self.REVALUED]
+		self.assertEqual((row["status"], row["count"], row["amount"]), ("Fail", 1, 1000))
+
+	def test_balance_at_the_year_end_rate_passes(self):
+		base, foreign = self._foreign()
+		self._rate(foreign, base, 90)
+		with patch(PATCH_BALANCES, return_value=[self._balance(foreign, 100, 9000)]):
+			row = self._rows()[self.REVALUED]
+		self.assertEqual((row["status"], row["count"]), ("Pass", 0))
+
+	def test_missing_rate_is_flagged_and_never_calls_the_online_service(self):
+		_base, foreign = self._foreign()
+		with (
+			patch(PATCH_BALANCES, return_value=[self._balance(foreign, 100, 8000)]),
+			patch("erpnext.setup.utils.get_exchange_rate", side_effect=AssertionError("online lookup")),
+		):
+			rows = self._rows()
+		self.assertEqual(rows[self.RATE_PRESENT]["status"], "Fail")
+		self.assertIn(foreign, rows[self.RATE_PRESENT]["hint"])
+
+	def test_no_foreign_balances_skips_revaluation_checks(self):
+		with patch(PATCH_BALANCES, return_value=[]):
+			rows = self._rows()
+		for label in (self.REVALUED, self.RATE_PRESENT, self.NO_DRAFT):
+			self.assertNotIn(label, rows)
+
+	def test_draft_revaluation_is_flagged(self):
+		self._insert("Exchange Rate Revaluation", company=COMPANY, docstatus=0, posting_date="2027-03-31")
+		with patch(PATCH_BALANCES, return_value=[]):
+			row = self._rows()[self.NO_DRAFT]
+		self.assertEqual((row["status"], row["count"]), ("Fail", 1))
+
+	def test_draft_revaluation_journal_is_flagged(self):
+		je = self._insert(
+			"Journal Entry",
+			company=COMPANY,
+			docstatus=0,
+			posting_date="2027-03-31",
+			voucher_type="Exchange Gain Or Loss",
+		)
+		self._insert(
+			"Journal Entry Account",
+			parent=je.name,
+			parenttype="Journal Entry",
+			parentfield="accounts",
+			reference_type="Exchange Rate Revaluation",
+			reference_name="ERR-0001",
+		)
+		with patch(PATCH_BALANCES, return_value=[]):
+			row = self._rows()[self.NO_DRAFT]
+		self.assertEqual((row["status"], row["count"]), ("Fail", 1))

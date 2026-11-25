@@ -1,5 +1,8 @@
 import frappe
 from erpnext import is_perpetual_inventory_enabled
+from erpnext.accounts.doctype.exchange_rate_revaluation.exchange_rate_revaluation import (
+	ExchangeRateRevaluation,
+)
 from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import apply_unscoped_filters
 from frappe import _
 from frappe.query_builder.functions import Count, Max, Sum
@@ -36,6 +39,8 @@ def execute(filters=None):
 	rows.append(check_unclosed_prior_years(filters.company, start))
 	rows.append(check_stock_closing_entry(filters.company, end))
 	rows.extend(check_background_jobs(filters.company, end))
+	rows.append(check_unposted_depreciation(filters.company, end))
+	rows.extend(check_exchange_revaluation(filters.company, end))
 	currency = frappe.get_cached_value("Company", filters.company, "default_currency")
 	rows = [r for r in rows if r]
 	for r in rows:
@@ -294,6 +299,165 @@ def check_background_jobs(company, end):
 				not count,
 				count=int(count or 0),
 				hint=_("A voucher is still posting in the background. Wait before reading the books."),
+			)
+		)
+	return out
+
+
+DEPRECIABLE_ASSET_STATUSES = ["Submitted", "Partially Depreciated"]
+
+
+def check_unposted_depreciation(company, end):
+	"""Depreciation due by year end that has no journal entry.
+
+	Same definition of "due" as core's depreciation booking job (assets.doctype.asset.depreciation),
+	but core only books it when Accounts Settings has automatic booking on and never reports what was
+	left behind.
+	"""
+	if not frappe.db.exists("DocType", "Asset Depreciation Schedule"):
+		return None
+	asset = frappe.qb.DocType("Asset")
+	if not frappe.db.exists("Asset", {"company": company, "docstatus": 1, "calculate_depreciation": 1}):
+		return None
+
+	ads = frappe.qb.DocType("Asset Depreciation Schedule")
+	ds = frappe.qb.DocType("Depreciation Schedule")
+	count, amount = (
+		frappe.qb.from_(ads)
+		.join(asset)
+		.on(ads.asset == asset.name)
+		.join(ds)
+		.on(ds.parent == ads.name)
+		.select(Count(ds.name), Sum(ds.depreciation_amount))
+		.where(
+			(asset.company == company)
+			& (asset.calculate_depreciation == 1)
+			& (asset.docstatus == 1)
+			& (ads.docstatus == 1)
+			& (asset.status.isin(DEPRECIABLE_ASSET_STATUSES))
+			& (ds.schedule_date <= end)
+			& (ds.journal_entry.isnull() | (ds.journal_entry == ""))
+		)
+	).run()[0]
+	count, amount = int(count or 0), flt(amount)
+
+	automatic = frappe.get_single_value("Accounts Settings", "book_asset_depreciation_entry_automatically")
+	hint = _(
+		"Book these from the assets (Make Depreciation Entry), or from Asset Depreciation Schedule. "
+		"If you book depreciation with your own journal entry, you can ignore this."
+	)
+	if not automatic:
+		hint = _("Automatic booking is off in Accounts Settings.") + " " + hint
+	return _row(
+		_("Depreciation due by year end is booked"),
+		count == 0,
+		count=count,
+		amount=amount,
+		hint=hint,
+	)
+
+
+def _local_exchange_rate(from_currency, to_currency, on_date):
+	"""Latest Currency Exchange record on or before the date. Never calls the online rate service.
+
+	Core's get_exchange_rate falls back to an HTTP request when no local rate exists, which a report
+	that anyone can refresh must not do.
+	"""
+	rows = frappe.get_all(
+		"Currency Exchange",
+		filters={"from_currency": from_currency, "to_currency": to_currency, "date": ("<=", on_date)},
+		fields=["exchange_rate"],
+		order_by="date desc",
+		limit=1,
+	)
+	return flt(rows[0].exchange_rate) if rows else 0.0
+
+
+def check_exchange_revaluation(company, end):
+	"""Foreign currency balances still at old rates, and revaluation journals left in Draft.
+
+	Compares the ledger itself with the rate at year end, so a revaluation booked by hand passes too.
+	Which accounts to look at comes from core (Exchange Rate Revaluation); only the rate lookup differs.
+	"""
+	if not frappe.db.exists("DocType", "Exchange Rate Revaluation"):
+		return []
+	out = []
+	currency = frappe.get_cached_value("Company", company, "default_currency")
+
+	balances = ExchangeRateRevaluation.get_account_balance_from_gle(
+		company=company,
+		posting_date=end,
+		account=None,
+		party_type=None,
+		party=None,
+		rounding_loss_allowance=0.0,
+	)
+	stale, missing_rate, gain_loss_total = 0, set(), 0.0
+	for b in balances:
+		if b.zero_balance:
+			continue
+		rate = _local_exchange_rate(b.account_currency, currency, end)
+		if not rate:
+			missing_rate.add(b.account_currency)
+			continue
+		diff = flt(b.balance_in_account_currency * rate - b.balance, 2)
+		if diff:
+			stale += 1
+			gain_loss_total += diff
+	if balances:
+		if missing_rate:
+			out.append(
+				_row(
+					_("Exchange rate available for every foreign currency at year end"),
+					False,
+					count=len(missing_rate),
+					hint=_("No Currency Exchange record on or before {0} for: {1}.").format(
+						formatdate(end), ", ".join(sorted(missing_rate))
+					),
+				)
+			)
+		out.append(
+			_row(
+				_("Foreign currency balances revalued at year end rates"),
+				stale == 0,
+				count=stale,
+				amount=gain_loss_total,
+				hint=_(
+					"These accounts still carry an older exchange rate. Create an Exchange Rate Revaluation "
+					"dated {0}, or book the difference by journal entry."
+				).format(formatdate(end)),
+			)
+		)
+
+	draft_err = frappe.db.count(
+		"Exchange Rate Revaluation", {"company": company, "docstatus": 0, "posting_date": ("<=", end)}
+	)
+	je = frappe.qb.DocType("Journal Entry")
+	jea = frappe.qb.DocType("Journal Entry Account")
+	draft_jvs = (
+		frappe.qb.from_(je)
+		.join(jea)
+		.on(jea.parent == je.name)
+		.select(je.name)
+		.distinct()
+		.where(
+			(je.company == company)
+			& (je.docstatus == 0)
+			& (jea.reference_type == "Exchange Rate Revaluation")
+			& (je.posting_date <= end)
+		)
+	).run()
+	pending = draft_err + len(draft_jvs)
+	if balances or pending or frappe.db.exists("Exchange Rate Revaluation", {"company": company}):
+		out.append(
+			_row(
+				_("No Exchange Rate Revaluation left in Draft"),
+				pending == 0,
+				count=pending,
+				hint=_(
+					"A revaluation or its journal entries are still in Draft, so nothing is posted. "
+					"Submit them, or turn on Submit ERR Journals? in the Company."
+				),
 			)
 		)
 	return out
