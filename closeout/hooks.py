@@ -191,7 +191,7 @@ required_apps = ["erpnext"]
 # Testing
 # -------
 
-# before_tests = "closeout.install.before_tests"
+before_tests = "closeout.tests.setup.before_tests"
 
 # Extend DocType Class
 # ------------------------------
