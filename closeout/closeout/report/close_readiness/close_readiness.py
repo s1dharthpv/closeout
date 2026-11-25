@@ -1,9 +1,4 @@
 import frappe
-from erpnext import is_perpetual_inventory_enabled
-from erpnext.accounts.doctype.exchange_rate_revaluation.exchange_rate_revaluation import (
-	ExchangeRateRevaluation,
-)
-from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import apply_unscoped_filters
 from frappe import _
 from frappe.query_builder.functions import Count, Max, Sum
 from frappe.utils import flt, formatdate, getdate
@@ -192,6 +187,11 @@ def check_stock_closing_entry(company, end):
 	Core only asks for a company-wide, completed and fresh Stock Closing Entry when the company
 	uses perpetual inventory and has stock ledger entries up to the period end.
 	"""
+	# erpnext is imported inside the checks, not at module level: it is a declared dependency
+	# that may not be installed yet when the marketplace validates this app on its own.
+	from erpnext import is_perpetual_inventory_enabled
+	from erpnext.stock.doctype.stock_closing_entry.stock_closing_entry import apply_unscoped_filters
+
 	label = _("Stock Closing Entry is completed and up to date")
 	if not frappe.db.exists("DocType", "Stock Closing Entry"):
 		return None
@@ -378,6 +378,10 @@ def check_exchange_revaluation(company, end):
 	Compares the ledger itself with the rate at year end, so a revaluation booked by hand passes too.
 	Which accounts to look at comes from core (Exchange Rate Revaluation); only the rate lookup differs.
 	"""
+	from erpnext.accounts.doctype.exchange_rate_revaluation.exchange_rate_revaluation import (
+		ExchangeRateRevaluation,
+	)
+
 	if not frappe.db.exists("DocType", "Exchange Rate Revaluation"):
 		return []
 	out = []

@@ -1,7 +1,4 @@
-import erpnext
 import frappe
-from erpnext.accounts.report.financial_statements import get_cost_centers_with_children
-from erpnext.accounts.report.trial_balance.trial_balance import execute as core_execute
 from frappe import _
 from frappe.query_builder.functions import Sum
 from frappe.utils import cstr, flt, getdate
@@ -10,6 +7,11 @@ VIRTUAL_ROW = "Unclosed prior-year P&L (virtual)"
 
 
 def execute(filters=None):
+	# erpnext is imported inside the functions, not at module level: it is a declared dependency
+	# that may not be installed yet when the marketplace validates this app on its own.
+	import erpnext
+	from erpnext.accounts.report.trial_balance.trial_balance import execute as core_execute
+
 	filters = frappe._dict(filters or {})
 	columns, data = core_execute(filters)
 	data = data or []
@@ -58,6 +60,8 @@ def execute(filters=None):
 
 
 def get_unclosed_pl_before(filters):
+	from erpnext.accounts.report.financial_statements import get_cost_centers_with_children
+
 	"""Credit minus debit of every Profit and Loss GL entry before the fiscal year starts.
 
 	Period Closing Voucher entries are included on purpose: they offset the P&L of the years they
