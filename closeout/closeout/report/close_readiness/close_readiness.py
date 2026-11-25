@@ -61,7 +61,7 @@ def execute(filters=None):
 
 def get_columns():
 	return [
-		{"fieldname": "check", "label": _("Check"), "fieldtype": "Data", "width": 350, "align": "left"},
+		{"fieldname": "check", "label": _("Check"), "fieldtype": "Data", "width": 430, "align": "left"},
 		{"fieldname": "status", "label": _("Status"), "fieldtype": "Data", "width": 90, "align": "left"},
 		{"fieldname": "count", "label": _("Count"), "fieldtype": "Int", "width": 80},
 		{
@@ -71,7 +71,7 @@ def get_columns():
 			"options": "currency",
 			"width": 130,
 		},
-		{"fieldname": "hint", "label": _("What to do"), "fieldtype": "Data", "width": 470, "align": "left"},
+		{"fieldname": "hint", "label": _("What to do"), "fieldtype": "Data", "width": 820, "align": "left"},
 	]
 
 
@@ -343,8 +343,7 @@ def check_unposted_depreciation(company, end):
 
 	automatic = frappe.get_single_value("Accounts Settings", "book_asset_depreciation_entry_automatically")
 	hint = _(
-		"Book these from the assets (Make Depreciation Entry), or from Asset Depreciation Schedule. "
-		"If you book depreciation with your own journal entry, you can ignore this."
+		"Book these from the asset (Make Depreciation Entry). If you book depreciation by journal entry, ignore this."
 	)
 	if not automatic:
 		hint = _("Automatic booking is off in Accounts Settings.") + " " + hint
@@ -423,8 +422,7 @@ def check_exchange_revaluation(company, end):
 				count=stale,
 				amount=gain_loss_total,
 				hint=_(
-					"These accounts still carry an older exchange rate. Create an Exchange Rate Revaluation "
-					"dated {0}, or book the difference by journal entry."
+					"Still at an older rate. Create an Exchange Rate Revaluation dated {0}, or book it by journal entry."
 				).format(formatdate(end)),
 			)
 		)
@@ -455,8 +453,7 @@ def check_exchange_revaluation(company, end):
 				pending == 0,
 				count=pending,
 				hint=_(
-					"A revaluation or its journal entries are still in Draft, so nothing is posted. "
-					"Submit them, or turn on Submit ERR Journals? in the Company."
+					"Revaluation or its journals still in Draft, so nothing is posted. Submit them, or tick Submit ERR Journals? on the Company."
 				),
 			)
 		)
