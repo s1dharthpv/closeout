@@ -308,7 +308,7 @@ class TestBackgroundAndStockChecks(IntegrationTestCase):
 
 		for target, replacement in (
 			(
-				"closeout.closeout.report.close_readiness.close_readiness.is_perpetual_inventory_enabled",
+				"erpnext.is_perpetual_inventory_enabled",
 				lambda company: True,
 			),
 			("frappe.db.exists", exists),
@@ -360,7 +360,7 @@ class TestBackgroundAndStockChecks(IntegrationTestCase):
 
 
 PATCH_BALANCES = (
-	"closeout.closeout.report.close_readiness.close_readiness.ExchangeRateRevaluation"
+	"erpnext.accounts.doctype.exchange_rate_revaluation.exchange_rate_revaluation.ExchangeRateRevaluation"
 	".get_account_balance_from_gle"
 )
 
